@@ -5,9 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
 from .processing import (
-    analyze_map,
     detect_embedded_measurement_markers,
-    detect_markers,
 )
 
 app = FastAPI(title="Wi-Fi Heatmap Detection API", version="1.0.0")
@@ -34,10 +32,7 @@ async def detect_points(floor_plan: UploadFile = File(...)) -> dict[str, object]
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Imagem da planta invalida.") from exc
 
-    profile = analyze_map(image)
     markers = detect_embedded_measurement_markers(image)
-    if not markers:
-        markers = detect_markers(image, profile)
     markers = sorted(markers, key=lambda marker: (marker.y, marker.x))
     points = [
         {

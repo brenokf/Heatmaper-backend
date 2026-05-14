@@ -35,6 +35,25 @@ MAP_PROFILES = {
 }
 
 
+def marker_limits(width: int, height: int) -> tuple[int, float]:
+    area = width * height
+    max_points = min(80, max(8, round((area**0.5) / 18)))
+    min_distance = min(62.0, max(18.0, max(width, height) * 0.018))
+    return max_points, min_distance
+
+
+def dedupe_markers(markers: list[Marker], width: int, height: int) -> list[Marker]:
+    max_points, min_distance = marker_limits(width, height)
+    accepted: list[Marker] = []
+    for marker in sorted(markers, key=lambda item: item.area, reverse=True):
+        duplicate = any(((marker.x - other.x) ** 2 + (marker.y - other.y) ** 2) ** 0.5 < min_distance for other in accepted)
+        if not duplicate:
+            accepted.append(marker)
+        if len(accepted) >= max_points:
+            break
+    return sorted(accepted, key=lambda item: (item.y, item.x))
+
+
 def estimate_background(rgb: np.ndarray) -> np.ndarray:
     h, w, _ = rgb.shape
     samples = np.concatenate([rgb[0, :, :], rgb[h - 1, :, :], rgb[:, 0, :], rgb[:, w - 1]], axis=0)
@@ -158,11 +177,22 @@ def detect_embedded_measurement_markers(image: Image.Image) -> list[Marker]:
     marker_mask = dilate_mask(red_mask, iterations=4)
     markers: list[Marker] = []
 
+    height, width = red_mask.shape
+    image_area = width * height
+    max_box = min(118, max(38, round(max(width, height) * 0.055)))
+    min_box = min(18, max(6, round(max(width, height) * 0.004)))
+    min_area = max(18, round(image_area * 0.000006))
+    max_area = max(700, min(6500, round(image_area * 0.0022)))
+
     for area, x, y, w, h in connected_components(marker_mask):
-        if not (80 <= area <= 5200 and 15 <= w <= 92 and 15 <= h <= 92):
+        if not (min_area <= area <= max_area and min_box <= w <= max_box and min_box <= h <= max_box):
             continue
         aspect = w / max(h, 1)
-        if 0.55 <= aspect <= 1.85:
+        density = area / max(w * h, 1)
+        long_axis = max(w, h)
+        short_axis = min(w, h)
+        long_thin_annotation = long_axis > max(width, height) * 0.08 and short_axis <= max(8, max(width, height) * 0.01)
+        if 0.5 <= aspect <= 2 and 0.045 <= density <= 0.96 and not long_thin_annotation:
             markers.append(Marker(x + w / 2, y + h / 2, area))
 
-    return markers
+    return dedupe_markers(markers, width, height)
