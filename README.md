@@ -13,20 +13,51 @@ Backend FastAPI opcional para detectar pontos visuais em uma planta baixa. A ger
 
 ## Rodar
 
+O backend precisa de Python 3.11+ instalado. Primeiro confirme:
+
+```powershell
+python --version
+```
+
+Pelo diretorio raiz do projeto, a forma recomendada e:
+
+```powershell
+.\scripts\run-backend.ps1
+```
+
+Se o PowerShell bloquear a execucao de scripts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run-backend.ps1
+```
+
+Execucao manual, sem depender de `Activate.ps1`:
+
 ```powershell
 cd backend
 python -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Se a `.venv` ja existir e falhar com `did not find executable`, ela esta
+apontando para um Python removido. Recrie:
+
+```powershell
+cd backend
+Remove-Item .venv -Recurse -Force
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 ## Testes
 
 ```powershell
 cd backend
-.venv\Scripts\python.exe -m unittest discover tests
+.\.venv\Scripts\python.exe -m unittest discover tests
 ```
 
 ## Endpoint

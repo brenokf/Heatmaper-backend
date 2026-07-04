@@ -168,6 +168,92 @@ def connected_components(mask: np.ndarray) -> list[tuple[int, int, int, int, int
     return components
 
 
+def enhance_floorplan_bw(image: Image.Image, high_res: bool = False) -> Image.Image:
+    """
+    Convert a floor plan image to a clean black-and-white version, close to
+    just the room contours: walls stay, flooring hatch/tile-grid patterns
+    (thin, repetitive, disconnected from the wall network) are stripped.
+
+    Pipeline:
+    1. Grayscale
+    2. CLAHE – local contrast boost so faint walls survive thresholding
+    3. Gaussian blur – remove rasterisation noise
+    4. Adaptive threshold (Gaussian) – handles uneven background brightness
+    5. Morphological close – bridge tiny gaps inside wall segments
+    6. Morphological open, kernel scaled to resolution – erase thin hatching/
+       tile-grid lines and isolated specks while keeping thicker wall strokes
+    7. Connected-component area filter – drop any remaining small speckle
+       component not part of the large wall network
+    8. Ensure black-on-white output
+    """
+    if cv2 is None:
+        return image.convert("L").point(lambda x: 0 if x < 200 else 255, "L")
+
+    rgb = np.asarray(image.convert("RGB"))
+    height, width = rgb.shape[:2]
+    max_dim = max(width, height)
+
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+
+    # CLAHE boosts local contrast so walls with low contrast survive thresholding
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+
+    # Light denoise – 3×3 keeps fine wall lines intact
+    blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
+
+    # Adaptive threshold: each pixel is compared against its local neighbourhood.
+    # blockSize scales with resolution so it stays ~a few real-world cm wide;
+    # C=10 keeps faint elements visible.
+    block_size = max(11, (round(max_dim / 90) | 1))  # odd, ~ same physical size at any DPI
+    binary = cv2.adaptiveThreshold(
+        blurred,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        blockSize=block_size,
+        C=10,
+    )
+
+    # Close tiny gaps inside wall lines. Kernel scales with resolution so a
+    # ~5000px-wide render (vector-PDF crop at 250 DPI) gets a proportionally
+    # larger kernel than a small PNG upload, instead of a fixed 2px no-op.
+    close_size = max(2, round(max_dim / 1200))
+    k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (close_size, close_size))
+    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k_close)
+
+    # Opening with a resolution-scaled kernel erases thin repeated hatching
+    # (flooring tile grids, material fill patterns) and isolated noise dots,
+    # while thicker wall strokes survive since they're wider than the kernel.
+    open_size = max(2, round(max_dim / 700))
+    k_open = cv2.getStructuringElement(cv2.MORPH_RECT, (open_size, open_size))
+    cleaned = cv2.morphologyEx(closed, cv2.MORPH_OPEN, k_open)
+
+    # Drop any remaining small speckle component (fragments of hatching that
+    # survived opening) that isn't part of the large connected wall network.
+    # Foreground polarity varies per source, so filter whichever value is the
+    # minority (the "ink"), not hardcoded black-on-white.
+    black_pixels = int((cleaned == 0).sum())
+    white_pixels = int((cleaned == 255).sum())
+    ink_value = 0 if black_pixels <= white_pixels else 255
+    ink_mask = (cleaned == ink_value).astype(np.uint8)
+    min_component_area = max(24, round((max_dim**2) * 0.000006))
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(ink_mask, 8)
+    filtered_ink = np.zeros_like(ink_mask)
+    for label in range(1, num):
+        if stats[label, cv2.CC_STAT_AREA] >= min_component_area:
+            filtered_ink[labels == label] = 1
+    cleaned = np.where(filtered_ink == 1, ink_value, 255 - ink_value).astype(np.uint8)
+
+    # Ensure background is white (most plans: dark lines on light BG)
+    white_pixels = int((cleaned == 255).sum())
+    black_pixels = int((cleaned == 0).sum())
+    if black_pixels > white_pixels:
+        cleaned = cv2.bitwise_not(cleaned)
+
+    return Image.fromarray(cleaned, mode="L")
+
+
 def detect_embedded_measurement_markers(image: Image.Image) -> list[Marker]:
     rgb = np.asarray(image.convert("RGB"))
     red = rgb[:, :, 0].astype(np.int16)
