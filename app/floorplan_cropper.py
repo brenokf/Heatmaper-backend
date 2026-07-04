@@ -313,15 +313,48 @@ def _cv_bbox(img_gray: np.ndarray) -> Optional[tuple[int, int, int, int]]:
 def _pil_bbox(img_gray: np.ndarray) -> Optional[tuple[int, int, int, int]]:
     """
     Pure NumPy fallback when OpenCV is not available.
-    Uses row/column density projections.
+
+    Content is first binarized onto a coarse density grid (matching
+    _vector_bbox's approach) and reduced to its largest CONNECTED component
+    via _largest_component_bbox_numpy, instead of a plain row/column "any
+    content" projection — the latter merges a scanned floor plan with any
+    disconnected peripheral block (legend, title block, stamp) that happens
+    to be dark enough to pass the threshold, even across a clear white gap.
     """
-    binary = img_gray < 240  # True where content
-    rows = np.where(binary.any(axis=1))[0]
-    cols = np.where(binary.any(axis=0))[0]
-    if len(rows) == 0:
+    ih, iw = img_gray.shape
+    dark = img_gray < 240  # True where content
+
+    cell = max(3, round(max(iw, ih) / 200))
+    gw = -(-iw // cell)
+    gh = -(-ih // cell)
+    density = np.zeros((gh, gw), dtype=np.float32)
+    for gy in range(gh):
+        y0, y1 = gy * cell, min(ih, (gy + 1) * cell)
+        row_slice = dark[y0:y1, :]
+        for gx in range(gw):
+            x0, x1 = gx * cell, min(iw, (gx + 1) * cell)
+            region = row_slice[:, x0:x1]
+            density[gy, gx] = region.mean() if region.size else 0.0
+
+    if density.max() <= 0:
         return None
-    y0, y1 = int(rows[0]), int(rows[-1])
-    x0, x1 = int(cols[0]), int(cols[-1])
+    binary = (density >= 0.035).astype(np.uint8)
+    bbox = _largest_component_bbox_numpy(binary)
+    if bbox is None:
+        return None
+    gx0, gy0, gx1, gy1 = bbox
+
+    # Map grid bbox back to pixel space, then tighten to actual dark-pixel
+    # extents within it (the grid is coarse, so this trims leftover margin).
+    px0, py0 = gx0 * cell, gy0 * cell
+    px1, py1 = min(iw, (gx1 + 1) * cell), min(ih, (gy1 + 1) * cell)
+    region = dark[py0:py1, px0:px1]
+    rows = np.where(region.any(axis=1))[0]
+    cols = np.where(region.any(axis=0))[0]
+    if len(rows) == 0:
+        return (px0, py0, px1 - px0, py1 - py0)
+    y0, y1 = py0 + int(rows[0]), py0 + int(rows[-1])
+    x0, x1 = px0 + int(cols[0]), px0 + int(cols[-1])
     return (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
 
 
@@ -541,12 +574,62 @@ def _refine_edges_px(
 # Shared utility
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _largest_component_bbox_numpy(binary: np.ndarray) -> Optional[tuple[int, int, int, int]]:
+    """
+    Pure-NumPy/BFS connected-component bounding box (used when OpenCV isn't
+    installed — the default in this project's devcontainer, since opencv is
+    only in requirements-optional.txt). The grids passed in here are always
+    small (tens to a few hundred cells per side), so a plain iterative flood
+    fill is fast — no need for scipy.
+
+    A prior version of this fallback returned the bounding box of *every*
+    nonzero cell (via np.any per row/col) instead of an actual connected
+    component. That silently merged a floor plan with any disconnected
+    peripheral block (legend, title block) that happened to be dense enough
+    to pass the threshold, defeating the whole point of "largest component"
+    — the legend would ride along in the final crop even though a clear
+    white gap separates it from the drawing.
+    """
+    height, width = binary.shape
+    visited = np.zeros_like(binary, dtype=bool)
+    best: Optional[tuple[int, int, int, int]] = None
+    best_size = 0
+
+    for start_y in range(height):
+        for start_x in range(width):
+            if not binary[start_y, start_x] or visited[start_y, start_x]:
+                continue
+            stack = [(start_y, start_x)]
+            visited[start_y, start_x] = True
+            min_x = max_x = start_x
+            min_y = max_y = start_y
+            size = 0
+            while stack:
+                y, x = stack.pop()
+                size += 1
+                if x < min_x: min_x = x
+                if x > max_x: max_x = x
+                if y < min_y: min_y = y
+                if y > max_y: max_y = y
+                for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < height and 0 <= nx < width and binary[ny, nx] and not visited[ny, nx]:
+                        visited[ny, nx] = True
+                        stack.append((ny, nx))
+            if size > best_size:
+                best_size = size
+                best = (min_x, min_y, max_x, max_y)
+
+    return best
+
+
 def _largest_component_bbox(
     binary: np.ndarray,
 ) -> Optional[tuple[int, int, int, int]]:
     """
     Return grid (x0, y0, x1, y1) of the largest connected component in a
-    binary NumPy array.  Uses OpenCV when available, pure NumPy fallback.
+    binary NumPy array.  Uses OpenCV when available, pure NumPy/BFS fallback
+    otherwise (see _largest_component_bbox_numpy).
     """
     if HAS_CV2:
         num, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
@@ -559,13 +642,8 @@ def _largest_component_bbox(
         h = stats[i, cv2.CC_STAT_HEIGHT]
         return (x, y, x + w - 1, y + h - 1)
 
-    # NumPy fallback (no connected components, just overall bounding box)
-    rows = np.any(binary, axis=1)
-    cols = np.any(binary, axis=0)
-    if not rows.any():
+    bbox = _largest_component_bbox_numpy(binary)
+    if bbox is None:
         return None
-    row_indices = np.where(rows)[0]
-    col_indices = np.where(cols)[0]
-    y0, y1 = int(row_indices[0]), int(row_indices[-1])
-    x0, x1 = int(col_indices[0]), int(col_indices[-1])
+    x0, y0, x1, y1 = bbox
     return (x0, y0, x1, y1)
